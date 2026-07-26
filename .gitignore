@@ -1,0 +1,13 @@
+# Terraform state - contains resource metadata, can contain secrets. Never commit.
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Real variable values
+terraform.tfvars
+
+# Python
+__pycache__/
+*.pyc
+.env
+venv/
