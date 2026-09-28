@@ -77,6 +77,25 @@ def test_handwritten_delete(client: bigquery.Client) -> str:
     return "failed"
 
 
+def test_handwritten_drop(client: bigquery.Client) -> str:
+    """
+    Run a hand-written DROP TABLE as the SA and expect an IAM accessDenied 403
+    naming bigquery.tables.delete. Returns "passed" or "failed"; unlike DML, DDL is
+    not blocked by the free-tier billing rule, so this shows IAM even in sandbox mode.
+    """
+    print("TEST RAN: handwritten DROP TABLE")
+    try:
+        client.query(f"DROP TABLE `{PROJECT_ID}.fred_raw.indicators`").result()
+    except Forbidden as e:
+        return check_iam_denial(e, "bigquery.tables.delete")
+    except Exception as e:
+        print(f"FAILED: expected Forbidden, got {type(e).__name__}:\n")
+        print(e)
+        return "failed"
+    print("ERROR: DROP succeeded - the guardrail is broken!")
+    return "failed"
+
+
 def test_generated_delete(client: bigquery.Client) -> str:
     """
     Ask the model for a delete-everything statement, run it as the SA, expect an IAM accessDenied 403.
@@ -103,11 +122,13 @@ def test_generated_delete(client: bigquery.Client) -> str:
 
 
 def main() -> int:
-    """Run both tests, print a summary, and return a nonzero exit code on any failure."""
+    """Run all tests, print a summary, and return a nonzero exit code on any failure."""
     client = build_readonly_client()
     results = {
         "handwritten_delete": test_handwritten_delete(client),
     }
+    print()
+    results["handwritten_drop"] = test_handwritten_drop(client)
     print()
     results["generated_delete"] = test_generated_delete(client)
     print(f"\nSummary: {results}")
