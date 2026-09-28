@@ -26,9 +26,40 @@ def build_readonly_client() -> bigquery.Client:
     return bigquery.Client(project=PROJECT_ID, credentials=readonly_creds)
 
 
+def check_iam_denial(err: Forbidden, expected_permission: str) -> str:
+    """
+    Print the raw reason and message of a Forbidden, then decide if it is the RIGHT
+    403: an IAM accessDenied naming the expected missing permission. Returns "passed"
+    or "failed". Change this if BigQuery's error shape or the expected roles change.
+    """
+    # Real Forbidden objects here carry errors=[{"reason", "message"}]; the
+    # permission name only appears inside the message text.
+    first = err.errors[0] if err.errors else {}
+    reason = first.get("reason")
+    message = first.get("message") or err.message
+    print(f"Raw reason:  {reason}")
+    print(f"Raw message: {message}\n")
+
+    if reason == "billingNotEnabled":
+        print("FAILED: billingNotEnabled - the project is in sandbox mode, so this 403 is "
+              "not from IAM and proves nothing about the read-only SA. Enable billing.")
+        return "failed"
+    if reason != "accessDenied":
+        print(f"FAILED: expected reason accessDenied, got {reason!r}.")
+        return "failed"
+    if "bigquery.jobs.create" in message:
+        print("FAILED: jobUser binding missing, SA can't start queries at all.")
+        return "failed"
+    if expected_permission not in message:
+        print(f"FAILED: accessDenied, but the message does not name {expected_permission}.")
+        return "failed"
+    print(f"BLOCKED BY IAM AS EXPECTED: accessDenied naming {expected_permission}.")
+    return "passed"
+
+
 def test_handwritten_delete(client: bigquery.Client) -> str:
     """
-    Run a hand-written DELETE as the SA and expect a 403.
+    Run a hand-written DELETE as the SA and expect an IAM accessDenied 403.
     Returns "passed" or "failed"; change the SQL here to probe other writes.
     """
     print("TEST RAN: handwritten DELETE ... WHERE TRUE")
@@ -37,9 +68,7 @@ def test_handwritten_delete(client: bigquery.Client) -> str:
             f"DELETE FROM `{PROJECT_ID}.fred_raw.indicators` WHERE TRUE"
         ).result()
     except Forbidden as e:
-        print("BLOCKED AS EXPECTED. Raw 403 message:\n")
-        print(e)
-        return "passed"
+        return check_iam_denial(e, "bigquery.tables.updateData")
     except Exception as e:
         print(f"FAILED: expected Forbidden, got {type(e).__name__}:\n")
         print(e)
@@ -50,7 +79,7 @@ def test_handwritten_delete(client: bigquery.Client) -> str:
 
 def test_generated_delete(client: bigquery.Client) -> str:
     """
-    Ask the model for a delete-everything statement, run it as the SA, expect a 403.
+    Ask the model for a delete-everything statement, run it as the SA, expect an IAM accessDenied 403.
     Returns "passed", "failed" or "skipped" (model did not emit a DELETE).
     """
     print("TEST RAN: model-generated DELETE via generate_sql()")
@@ -64,9 +93,7 @@ def test_generated_delete(client: bigquery.Client) -> str:
     try:
         execute_sql(client, sql)
     except Forbidden as e:
-        print("BLOCKED AS EXPECTED. Raw 403 message:\n")
-        print(e)
-        return "passed"
+        return check_iam_denial(e, "bigquery.tables.updateData")
     except Exception as e:
         print(f"FAILED: expected Forbidden, got {type(e).__name__}:\n")
         print(e)
