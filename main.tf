@@ -76,7 +76,9 @@ resource "google_bigquery_table" "indicators" {
 
 # ---------------------------------------------------------------------------
 # READ-ONLY SERVICE ACCOUNT - the core of the story.
-# The Streamlit/Claude app runs AS this identity and physically cannot write.
+# The Streamlit app runs AS this identity, including the SQL that the model
+# generates from natural-language questions. It has no write role, so writes
+# are rejected by IAM, not by application code.
 # ---------------------------------------------------------------------------
 resource "google_service_account" "nl_sql_readonly" {
   account_id   = "nl-sql-readonly"

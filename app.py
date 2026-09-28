@@ -1,10 +1,15 @@
 """
 Streamlit viewer over the Terraform-provisioned BigQuery table.
 
-Key point: this app authenticates as nl-sql-readonly. Every query it runs -
-including anything the model generates - is executed by an identity that has
-dataViewer + jobUser and nothing else. Writes fail at the IAM layer, not in
-application code.
+Two features: an indicator chart with an "Explain with AI" button, and an
+"Ask the data" box (question -> the model generates SQL -> executed as the
+read-only SA).
+
+Key point: this app authenticates as nl-sql-readonly by impersonation. Every
+query it runs - including SQL the model generates - is executed by an identity
+that has bigquery.jobUser (project) and bigquery.dataViewer (fred_raw) and
+nothing else. The generated SQL is not filtered in Python; a write is rejected
+by IAM and surfaces as a 403 Forbidden.
 """
 
 import os
@@ -18,6 +23,9 @@ from openai import OpenAI
 from google.cloud import bigquery
 from google.auth import default as default_credentials
 from google.auth import impersonated_credentials
+from google.api_core.exceptions import Forbidden
+
+from nl_sql import execute_sql, generate_sql
 
 PROJECT_ID = "tf-data-platform-fumero"
 TABLE_ID = f"{PROJECT_ID}.fred_raw.indicators"
@@ -69,14 +77,17 @@ def list_indicators() -> pd.DataFrame:
 
 
 def explain_with_ai(df: pd.DataFrame, indicator_name: str) -> str:
-    """Send the on-screen rows to the model for a plain-English read of the trend."""
+    """
+    Send the on-screen rows to the model for a plain-English read of the trend.
+    Change this when you want a different model, tone, or amount of context.
+    """
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
     # Only the visible data goes to the model - it gets no DB access of its own.
     sample = df.tail(40).to_csv(index=False)
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini",   # cheap, same one you used in PuffZero
+        model="gpt-4o-mini",
         max_tokens=600,
         messages=[
             {
@@ -96,6 +107,25 @@ def explain_with_ai(df: pd.DataFrame, indicator_name: str) -> str:
         ],
     )
     return response.choices[0].message.content
+
+
+def run_generated_sql(sql: str) -> None:
+    """
+    Execute model-generated SQL as the read-only SA and render the outcome.
+    Change this to alter how results or permission errors are displayed.
+    """
+    # DELIBERATE: no Python check on the SQL (no SELECT-only rule, no keyword
+    # blocklist). The read-only SA's IAM roles are the only guardrail.
+    try:
+        st.dataframe(execute_sql(get_client(), sql), use_container_width=True)
+    except Forbidden as err:
+        st.error(f"403 from BigQuery: {err}")
+        st.caption(
+            f"`{READONLY_SA}` has no write role in main.tf "
+            "(only bigquery.jobUser and bigquery.dataViewer on fred_raw)."
+        )
+    except Exception as err:
+        st.exception(err)
 
 
 # --- UI -------------------------------------------------------------------
@@ -125,6 +155,14 @@ with col_b:
 if st.button("Explain with AI", type="primary"):
     with st.spinner("Analyzing..."):
         st.markdown(explain_with_ai(data, name))
+
+st.header("Ask the data")
+question = st.text_input("Ask a question about the indicators")
+if st.button("Generate and run SQL") and question:
+    with st.spinner("Generating SQL..."):
+        generated_sql = generate_sql(question)
+    st.code(generated_sql, language="sql")  # shown BEFORE execution
+    run_generated_sql(generated_sql)
 
 with st.expander("Why this app cannot write to BigQuery"):
     st.markdown(
